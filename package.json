@@ -71,7 +71,7 @@
   },
   "dependencies": {
     "elementtree": "^0.1.7",
-    "image-size": "^1.0.2",
+    "image-size": "npm:image-size-next@1.2.2",
     "jszip": "^3.10.1"
   },
   "devDependencies": {

@@ -17,6 +17,9 @@
     "populate"
   ],
   "main": "./build/index",
+  "engines": {
+    "node": ">=18"
+  },
   "files": [
     "build"
   ],
@@ -71,7 +74,7 @@
   },
   "dependencies": {
     "elementtree": "^0.1.7",
-    "image-size": "^1.0.2",
+    "image-size": "^2.0.4",
     "jszip": "^3.10.1"
   },
   "devDependencies": {

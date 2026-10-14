@@ -10,6 +10,8 @@ const { ExcelTemplate } = require('../build');
 const JSZip = require('jszip');
 const etree = require('elementtree');
 const path = require('path');
+const fs = require('fs');
+const { spawnSync } = require('child_process');
 
 function makeInlineStringWorkbook(
 	sheetData = '<row r="1"><c r="A1" t="inlineStr"><is><t>${name}</t></is></c></row>',
@@ -690,6 +692,66 @@ describe('Regression coverage', () => {
 		const imageRel = rels.findall('Relationship').find(rel => rel.attrib.Id === blip.attrib['r:embed']);
 		expect(await output.file(path.posix.join('xl/drawings', imageRel.attrib.Target)).async('nodebuffer')).toEqual(png);
 	});
+
+	it.each(['buffer', 'base64', 'absolute path', 'relative path', 'imageRootPath'])('preserves image bytes and scaled dimensions from %s', async inputType => {
+		const filename = path.join(__dirname, 'templates', 'dataset', 'large.png');
+		const png = fs.readFileSync(filename); // Fixture dimensions: 276 x 85 pixels.
+		const template = new ExcelTemplate({
+			imageRatio: 75.4,
+			imageRootPath: inputType === 'imageRootPath' ? path.dirname(filename) : null
+		});
+		const inputs = {
+			buffer: png,
+			base64: png.toString('base64'),
+			'absolute path': filename,
+			'relative path': path.relative(process.cwd(), filename),
+			imageRootPath: path.basename(filename)
+		};
+		await template.load(await makeInlineStringWorkbook(
+			'<row r="1"><c r="A1" t="inlineStr"><is><t>${image:photo}</t></is></c></row>'));
+		await template.process(1, { photo: inputs[inputType] });
+		const { zip } = await readOutput(template);
+		const drawing = etree.parse(await zip.file('xl/drawings/drawing1.xml').async('string')).getroot();
+		const anchors = drawing.findall('xdr:oneCellAnchor');
+		expect(anchors).toHaveLength(1);
+		const expectedSize = {
+			cx: String(Math.floor(276 * 9525 * 75.4 / 100)),
+			cy: String(Math.floor(85 * 9525 * 75.4 / 100))
+		};
+		expect(anchors[0].find('xdr:ext').attrib).toEqual(expectedSize);
+		expect(anchors[0].find('xdr:pic/xdr:spPr/a:xfrm/a:ext').attrib).toEqual(expectedSize);
+		const rels = etree.parse(await zip.file('xl/drawings/_rels/drawing1.xml.rels').async('string')).getroot();
+		const embed = anchors[0].find('xdr:pic/xdr:blipFill/a:blip').attrib['r:embed'];
+		const relationship = rels.findall('Relationship').find(rel => rel.attrib.Id === embed);
+		expect(relationship).toBeDefined();
+		expect(await zip.file(path.posix.join('xl/drawings', relationship.attrib.Target)).async('nodebuffer')).toEqual(png);
+	});
+
+	it.each([
+		['unrecognized buffer', Buffer.from('not an image')],
+		['invalid base64', 'not an image'],
+		['truncated PNG', Buffer.from('89504e470d0a1a0a', 'hex')]
+	])('rejects %s with the library image error', async (_name, photo) => {
+		const template = new ExcelTemplate();
+		await template.load(await makeInlineStringWorkbook(
+			'<row r="1"><c r="A1" t="inlineStr"><is><t>${image:photo}</t></is></c></row>'));
+		await expect(template.process(1, { photo })).rejects.toThrow(/imageObj cannot be parse as a buffer/);
+		expect(Object.keys(template.archive.files).filter(name => name.startsWith('xl/media/'))).toEqual([]);
+	});
+
+	it('rejects an ICNS entry with zero length without hanging', () => {
+		// A separate process bounds runtime even if a future dependency regresses to an infinite loop.
+		const result = spawnSync(process.execPath, ['-e',
+			"const assert = require('assert');" +
+			"const { ExcelTemplate } = require(process.argv[1]);" +
+			"const invalid = Buffer.from('69636e73000000106963703400000000', 'hex');" +
+			"assert.throws(() => new ExcelTemplate().imageToBuffer(invalid), /imageObj cannot be parse as a buffer image/);",
+			require.resolve('../build')
+		], { encoding: 'utf8', timeout: 2000 });
+		expect(result.error).toBeUndefined();
+		expect(result.stderr).toBe('');
+		expect(result.status).toBe(0);
+	}, 5000);
 
 	it('keeps cells and styles for all image table rows', async () => {
 		const token = '$' + '{table:rows.photo:image}';

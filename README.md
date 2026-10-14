@@ -260,18 +260,6 @@ await template.deleteSheet('Invoice copy');
 
 Column indexes start at `0`: A is `0`, B is `1`, and so on.
 
-## Saving the result
-
-The basic example writes the default result directly to a file. To receive a
-Node.js `Buffer` instead:
-
-```js
-const output = await template.build({ type: 'nodebuffer' });
-fs.writeFileSync('./output.xlsx', output);
-```
-
-You can also use `uint8array`, `arraybuffer`, `blob`, or `base64`.
-
 ## Limitations
 
 - The template must be saved as `.xlsx`. Formats `.xls`, `.xlsb`, and `.xlsm`

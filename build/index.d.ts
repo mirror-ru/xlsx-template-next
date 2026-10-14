@@ -79,8 +79,9 @@ export class ExcelTemplate {
     substitute(sheetName: any, substitutions: any): Promise<void>;
     /**
      * Build a new binary .xlsx file
+     * @param {import('jszip').JSZipGeneratorOptions} [options]
      */
-    build(options: any): Promise<string | number[] | ArrayBuffer | Uint8Array<ArrayBufferLike> | Blob | Buffer<ArrayBufferLike>>;
+    build(options?: import("jszip").JSZipGeneratorOptions): Promise<string | number[] | ArrayBuffer | Uint8Array<ArrayBufferLike> | Blob | Buffer<ArrayBufferLike>>;
     writeSharedStrings(): Promise<void>;
     addSharedString(s: any): number;
     getInlineString(cell: any): string;

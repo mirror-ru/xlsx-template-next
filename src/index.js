@@ -634,6 +634,7 @@ class ExcelTemplate {
 
 	/**
 	 * Build a new binary .xlsx file
+	 * @param {import('jszip').JSZipGeneratorOptions} [options]
 	 */
 	async build(options) {
 		if (!options)

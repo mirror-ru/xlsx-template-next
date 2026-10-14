@@ -262,34 +262,26 @@ Column indexes start at `0`: A is `0`, B is `1`, and so on.
 
 ## Limitations
 
-- The template must be saved as `.xlsx`. Formats `.xls`, `.xlsb`, and `.xlsm`
-  are not supported.
-- An array expands across cells in its own row, shifting subsequent cells
-  right; an empty array removes the placeholder cell and shifts them left.
-  A table expands downwards from the template row. An empty table clears its
-  placeholders without removing the row. Only limited adjustments to other
-  workbook structures are made:
+The template must be an `.xlsx` file. Older `.xls`, binary `.xlsb`, and macro
+enabled `.xlsm` files are not supported.
 
-  - Merged ranges and ordinary named cells/ranges starting to the right of the
-    array on the same row are shifted right or left.
-  - Merged ranges, Excel tables, and ordinary named cells/ranges below an
-    expanded table are moved down. A merged range that starts on the template
-    row is copied to the generated rows.
-  - Hyperlinks anchored to moved cells are moved with them.
-  - Ranges spanning several rows or crossing an insertion point need manual
-    checking. In particular, merged cells across multiple rows may become
-    invalid when those rows expand by different amounts. These updates are
-    not a general-purpose rewrite of every reference in the workbook.
-- Formula references are not rewritten when rows or columns are inserted. If a
-  formula must refer to a table with an unknown number of rows or columns,
-  either:
+Most ordinary templates work as expected: a list expands across a row and a
+table expands downwards. The library also moves the common things around that
+content — merged cells, named ranges, Excel tables, and hyperlinks.
 
-  - place the table at the end of a sheet and use a sufficiently large formula
-    range, keeping other data and the formula cell outside that range; or
-  - use an Excel table. Its range is expanded with the generated rows, so a
-    structured reference such as `TableName[ColumnName]` includes all values.
-    This means an actual named Excel table created in the template, not just
-    cells styled to look like a table.
-- Placeholder substitution is supported in ordinary cells and Excel tables,
-  not inside pivot tables or other specialised Excel objects. The library does
-  not refresh pivot tables.
+The tricky case is a complex layout around a growing table. If a table sits
+inside merged cells that span several rows, or a range crosses the place where
+new rows are inserted, open the generated file and check it in Excel. The
+library cannot safely understand and rewrite every kind of reference in a
+workbook.
+
+Formulas are kept and Excel recalculates their values when the generated file
+is opened. Their cell references are not changed automatically. For example,
+if rows are inserted above `=SUM(B2:B10)`, the formula still refers to
+`B2:B10`. For a table with an unknown number of rows, use an actual Excel table
+in the template and a formula such as `TableName[ColumnName]`. Its range grows
+with the generated rows. Another option is to put the table at the end of a
+sheet and use a larger fixed range in the formula.
+
+Tags work in ordinary cells and Excel tables. They do not work inside pivot
+tables, and pivot tables are not refreshed by the library.

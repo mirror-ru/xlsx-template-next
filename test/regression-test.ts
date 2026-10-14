@@ -166,6 +166,69 @@ describe('Regression coverage', () => {
 		expectInlineText((await readOutput(reloaded)).sheet, 'A1', 'Alice & Bob');
 	});
 
+	it('processes every worksheet through processAll', async () => {
+		const template = new ExcelTemplate();
+		await template.load(await makeTwoSheetWorkbook(
+			'<row r="1"><c r="A1" t="inlineStr"><is><t>First: ${first}</t></is></c></row>',
+			'<row r="1"><c r="A1" t="inlineStr"><is><t>Second: ${second}</t></is></c></row>'
+		));
+
+		await template.processAll({ first: 'Alice', second: 'Bob' });
+
+		const output = await JSZip.loadAsync(await template.build({ type: 'nodebuffer' }));
+		const firstSheet = etree.parse(await output.file('xl/worksheets/sheet1.xml').async('string')).getroot();
+		const secondSheet = etree.parse(await output.file('xl/worksheets/sheet2.xml').async('string')).getroot();
+		expectInlineText(firstSheet, 'A1', 'First: Alice');
+		expectInlineText(secondSheet, 'A1', 'Second: Bob');
+	});
+
+	it('expands a single-cell dimension across Z without changing its starting cell', async () => {
+		const template = new ExcelTemplate();
+		await template.load(await makeInlineStringWorkbook(
+			'<row r="5"><c r="Z5" t="inlineStr"><is><t>${values}</t></is></c></row>',
+			'Z5'
+		));
+
+		await template.process(1, { values: [10, 20] });
+
+		const { sheet } = await readOutput(template);
+		expect(sheet.find('dimension').attrib.ref).toBe('Z5:AA5');
+		expect(sheet.findall('sheetData/row').map(row => row.attrib.r)).toEqual(['5']);
+		expect(sheet.findall('sheetData/row/c').map(cell => cell.attrib.r)).toEqual(['Z5', 'AA5']);
+		expect(cellAt(sheet, 'Z5').find('v').text).toBe('10');
+		expect(cellAt(sheet, 'AA5').find('v').text).toBe('20');
+	});
+
+	it('preserves cell styles and mixed value types in a shared-string table', async () => {
+		const template = new ExcelTemplate();
+		await template.load(path.join(__dirname, 'templates', 't1.xlsx'));
+		const originalSheet = await template.loadSheet(1);
+		const style = cellAt(originalSheet.root, 'B7').attrib.s;
+		const originalStyles = await template.archive.file('xl/styles.xml').async('string');
+		const styles = etree.parse(originalStyles).getroot().findall('cellXfs/xf');
+		expect(style).toBeDefined();
+		expect(styles[Number(style)]).toBeDefined();
+
+		await template.process(1, { planData: [{ name: 123 }, { name: 'text' }, { name: false }] });
+
+		const { zip, sheet } = await readOutput(template);
+		const strings = etree.parse(await zip.file('xl/sharedStrings.xml').async('string')).getroot().findall('si');
+		const first = cellAt(sheet, 'B7');
+		const second = cellAt(sheet, 'B8');
+		const third = cellAt(sheet, 'B9');
+		for (const cell of [first, second, third]) {
+			expect(cell.getchildren().map(child => child.tag)).toEqual(['v']);
+			expect(cell.attrib.s).toBe(style);
+		}
+		expect(first.attrib.t).toBeUndefined();
+		expect(first.find('v').text).toBe('123');
+		expect(second.attrib.t).toBe('s');
+		expect(strings[Number(second.find('v').text)].find('t').text).toBe('text');
+		expect(third.attrib.t).toBe('b');
+		expect(third.find('v').text).toBe('0');
+		expect(await zip.file('xl/styles.xml').async('string')).toBe(originalStyles);
+	});
+
 	it.each([
 		{ label: 'null', substitutions: { name: null }, type: 'inlineStr', tag: 'is/t', text: '' },
 		{ label: 'undefined', substitutions: { name: undefined }, type: 'inlineStr', tag: 'is/t', text: '' },

@@ -24,13 +24,13 @@ To:
 
 ## Basic usage
 
-Create `template.xlsx` in Excel with placeholders such as `${extractDate}`,
-`${dates}`, `${table:people.name}`, and `${table:people.age}` in its cells.
-The [Tags](#tags) section explains how to lay them out.
+Put tags in the cells of `template.xlsx`, for example:
 
-Save the following code as `main.mjs` beside the template. After installing the
-package, run `node main.mjs` from that directory. It loads the template, fills
-one sheet, and writes `output.xlsx`:
+    | Date | ${extractDate} |
+    | Dates | ${dates} |
+    | ${table:people.name} | ${table:people.age} |
+
+Save this as `main.mjs` beside the template and run `node main.mjs`:
 
 ```js
 import { ExcelTemplate } from 'xlsx-template-next';
@@ -41,7 +41,7 @@ async function main() {
 
 	await template.load('./template.xlsx');
 
-	await template.process(1, {
+	await template.process('Sheet1', {
 		extractDate: new Date(),
 		dates: [
 			new Date('2023-06-01'),
@@ -60,40 +60,11 @@ async function main() {
 main();
 ```
 
-Use the shorter processing examples below in place of the `process(...)` block
-inside `main()`, after `load()` and before `build()`. Where only a `data` object
-is shown, pass it as the second argument to `process()`. Replace sample sheet
-names such as `Invoice` and `Report` with names that exist in your workbook.
-Constructor options are set when creating the `ExcelTemplate` instance, before
-loading the file.
-
-### Choosing a sheet
-
-To fill a cell containing `${invoiceNumber}` on a sheet named `Invoice`:
-
-```js
-const data = { invoiceNumber: 'INV-001' };
-await template.process('Invoice', data);
-```
-
-`process()` accepts a sheet name or number. A number first matches the sheet's
-internal ID; if no ID matches, it is treated as a one-based position. After
-sheets have been reordered, IDs and positions can differ, so using a name is
-the clearest choice.
-
-Alternatively, use the same `data` object to fill all sheets:
-
-```js
-await template.processAll(data);
-```
-
-The sheets can have different placeholders; include their values in `data`.
-Missing values are replaced with empty text.
+Replace `Sheet1` with the name of the sheet tab in your workbook.
 
 ### Loading from a buffer
 
-`load()` also accepts a `Buffer`, for example when the template was received
-from an HTTP request or read from storage:
+If the template is already in a `Buffer`, pass the buffer to `load()`:
 
 ```js
 import { ExcelTemplate } from 'xlsx-template-next';
@@ -105,7 +76,7 @@ async function main() {
 
 	await template.load(buffer);
 
-	await template.process(1, {
+	await template.process('Sheet1', {
 		extractDate: new Date(),
 		dates: [
 			new Date('2023-06-01'),
@@ -122,6 +93,24 @@ async function main() {
 }
 
 main();
+```
+
+### One sheet or every sheet
+
+For a sheet tab named `Invoice` with a cell containing `${invoiceNumber}`:
+
+```js
+await template.process('Invoice', {
+	invoiceNumber: 'INV-001'
+});
+```
+
+If the same tags appear on several sheets, fill all of them at once:
+
+```js
+await template.processAll({
+	invoiceNumber: 'INV-001'
+});
 ```
 
 ## Tags
@@ -137,9 +126,8 @@ might result in (depending on date formatting in the second cell):
 
     | Extracted on: | Jun-01-2023 |
 
-For a `Date` value, put the placeholder alone in the cell and apply a date
-format in Excel. To include a date inside text, pass an already formatted
-string instead.
+For dates, keep the placeholder alone in the cell and set its date format in
+Excel.
 
 Array indexes are supported:
 
@@ -161,8 +149,7 @@ Result:
 
 ### Formulas
 
-Put `${total}` alone in cell B11 of the `Report` sheet, then supply a string
-beginning with `=`:
+Put `${total}` in cell B11, then pass a formula as its value:
 
 ```js
 await template.process('Report', {
@@ -170,9 +157,7 @@ await template.process('Report', {
 });
 ```
 
-The library writes the formula but does not calculate its result. Recalculate
-the generated workbook in Excel to obtain the value. Inserting rows or columns
-does not rewrite the references inside the formula (see [Limitations](#limitations)).
+Excel calculates the formula when the generated file is opened.
 
 ### Columns
 
@@ -187,37 +172,42 @@ might result in:
 
 ### Tables
 
-For a table, put `${table:items.field}` placeholders in adjacent cells on one
-template row. Each placeholder must occupy its whole cell. The first item
-fills that row; further items create additional rows:
+Put table tags in one template row:
 
-    | Name                | Age                 |
+
+    | Name                 | Age                 |
     | ${table:people.name} | ${table:people.age} |
 
-With an array of `{ name, age }` objects in `people`, the result is:
+Pass an array:
+
+```js
+await template.process('Sheet1', {
+	people: [
+		{ name: 'John Smith', age: 20 },
+		{ name: 'Bob Johnson', age: 22 }
+	]
+});
+```
+
+The result:
 
     | Name        | Age |
     | John Smith  | 20  |
     | Bob Johnson | 22  |
 
-An array field inside a table row is repeated across columns in the same way.
-An empty table array clears its placeholder cells but keeps the template row.
+An array field in a table row is repeated across columns too.
 
 ### Images
 
-Put the image placeholder alone in its cell:
-
-    | My image: | ${image:imageName} |
-
-Given data
+Put `${image:imageName}` in a cell, then pass an image path:
 
 ```js
-const data = {
-	imageName: 'helloImage.jpg'
-};
+await template.process('Sheet1', {
+	imageName: './logo.png'
+});
 ```
 
-For images in a table, use:
+For an image in every row of a table, use this tag:
 
     | My images | ${table:images.name:image} |
 
@@ -232,12 +222,7 @@ const data = {
 };
 ```
 
-Image data can be a `Buffer` containing image bytes, a raw base64 string
-(without a `data:image/...;base64,` prefix), or a path to a local image file.
-Image URLs are not downloaded automatically.
-
-For example, with `${image:imageName}` in a cell on `Report`, read the image
-into a `Buffer` using the `fs` import from the full example:
+Paths, a `Buffer`, and raw base64 strings are supported. For a `Buffer`:
 
 ```js
 await template.process('Report', {
@@ -245,61 +230,47 @@ await template.process('Report', {
 });
 ```
 
-Relative image paths are resolved from the Node.js process's working
-directory. Set `imageRootPath` to use a different directory and pass image
-filenames relative to it:
+If all images are in one directory, configure it once and use filenames in
+your data:
 
 ```js
-const option = {
-	imageRootPath: '/path/to/your/image/dir'
-};
-const template = new ExcelTemplate(option);
+const template = new ExcelTemplate({
+	imageRootPath: './images',
+	imageRatio: 75
+});
+
+await template.load('./template.xlsx');
+await template.process('Sheet1', {
+	imageName: 'logo.png'
+});
 ```
 
-An image in a merged cell is sized to fit that merged area.
-
-Use `imageRatio` to scale image width and height in ordinary cells (percentage;
-default `100`). This option does not affect images in merged cells:
-
-```js
-const option = {
-	imageRatio: 75.4
-};
-const template = new ExcelTemplate(option);
-```
+`imageRatio` is a percentage and applies to ordinary cells. An image in a
+merged cell is fitted to that merged area.
 
 ## Sheet helpers
 
-You can copy or remove sheets by name or numeric ID, and hide columns by their
-zero-based indexes. Perform these operations after `load()` and before `build()`:
+Copy a sheet, hide columns B and D, then remove the copy:
 
 ```js
-const sheetName = 'Sheet1'; // replace with the name in your workbook
-await template.copySheet(sheetName, 'Copy of Sheet1');
-await template.hideCols(sheetName, [1, 3]); // hide columns B and D
-await template.deleteSheet('Copy of Sheet1');
+await template.copySheet('Invoice', 'Invoice copy');
+await template.hideCols('Invoice', [1, 3]);
+await template.deleteSheet('Invoice copy');
 ```
 
-`hideCols` accepts integer indexes from 0 (A) to 16383 (XFD). It hides only
-the requested columns, preserving the widths and styles of adjacent columns.
-`copySheet` accepts a sheet name or numeric ID; the new name is optional.
-Local defined names and comment threads are copied with the sheet.
+Column indexes start at `0`: A is `0`, B is `1`, and so on.
 
 ## Saving the result
 
-Call `build()` after processing the sheets and making any sheet changes.
-Without options it returns a `Uint8Array` containing the `.xlsx` file, which
-can be passed directly to `fs.writeFileSync()` as in the full examples.
-
-For a Node.js `Buffer`, pass an options object:
+The basic example writes the default result directly to a file. To receive a
+Node.js `Buffer` instead:
 
 ```js
 const output = await template.build({ type: 'nodebuffer' });
 fs.writeFileSync('./output.xlsx', output);
 ```
 
-Other output types include `uint8array`, `arraybuffer`, `blob`, and `base64`.
-Whenever you pass an options object, include `type` explicitly.
+You can also use `uint8array`, `arraybuffer`, `blob`, or `base64`.
 
 ## Limitations
 

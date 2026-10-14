@@ -4,3 +4,4 @@ build/*.d.ts
 !build/index.d.ts
 *.map
 example/
+test/coverage/

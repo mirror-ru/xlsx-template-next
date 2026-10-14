@@ -233,25 +233,35 @@ class ExcelTemplate {
 		if (this.calChainRel)
 			this.calcChainPath = this.prefix + "/" + this.calChainRel.attrib.Target;
 
-		this.sharedStringsPath = this.prefix + "/" + this.workbookRels.find("Relationship[@Type='" + SHARED_STRINGS_RELATIONSHIP + "']").attrib.Target;
+		this.sharedStringsPath = "";
 		this.sharedStrings = [];
+		this.sharedStringsLookup = {};
 
-		let parseTextSharedStr = await this.archive.file(this.sharedStringsPath).async('string');
+		var sharedStringsRel = this.workbookRels.find("Relationship[@Type='" + SHARED_STRINGS_RELATIONSHIP + "']");
+		if (sharedStringsRel !== null) {
+			this.sharedStringsPath = this.prefix + "/" + sharedStringsRel.attrib.Target;
+			let sharedStringsFile = this.archive.file(this.sharedStringsPath);
 
-		etree.parse(parseTextSharedStr).getroot().findall('si').forEach(si => {
-			var t = { text: '' };
+			if (sharedStringsFile === null)
+				throw new Error('Shared strings file not found: ' + this.sharedStringsPath);
 
-			si.findall('t').forEach(tmp => {
-				t.text += tmp.text;
+			let parseTextSharedStr = await sharedStringsFile.async('string');
+
+			etree.parse(parseTextSharedStr).getroot().findall('si').forEach(si => {
+				var t = { text: '' };
+
+				si.findall('t').forEach(tmp => {
+					t.text += tmp.text;
+				});
+
+				si.findall('r/t').forEach(tmp => {
+					t.text += tmp.text;
+				});
+
+				this.sharedStrings.push(t.text);
+				this.sharedStringsLookup[t.text] = this.sharedStrings.length - 1;
 			});
-
-			si.findall('r/t').forEach(tmp => {
-				t.text += tmp.text;
-			});
-
-			this.sharedStrings.push(t.text);
-			this.sharedStringsLookup[t.text] = this.sharedStrings.length - 1;
-		});
+		}
 
 		let parseTextContentTypes = await this.archive.file('[Content_Types].xml').async('string');
 
@@ -321,11 +331,16 @@ class ExcelTemplate {
 
 				cell.attrib.r = this.getCurrentCell(cell, currentRow, cellsInserted);
 
-				// If c[@t="s"] (string column), look up /c/v@text as integer in
-				// `this.sharedStrings`
-				if (cell.attrib.t === 's') {
-					// Look for a shared string that may contain placeholders
-					var cellValue = cell.find('v'), stringIndex = parseInt(cellValue.text, 10), string = this.sharedStrings[stringIndex];
+				// Look for shared and inline strings that may contain placeholders.
+				if (cell.attrib.t === 's' || cell.attrib.t === 'inlineStr') {
+					var string;
+
+					if (cell.attrib.t === 's') {
+						var cellValue = cell.find('v'), stringIndex = parseInt(cellValue.text, 10);
+						string = this.sharedStrings[stringIndex];
+					} else {
+						string = this.getInlineString(cell);
+					}
 
 					if (string === undefined)
 						return;
@@ -475,7 +490,7 @@ class ExcelTemplate {
 		// Update <dimension /> if we added rows or columns
 		if (dimension) {
 			if (totalRowsInserted > 0 || totalColumnsInserted > 0) {
-				var dimensionRange = this.splitRange(dimension.attrib.ref), dimensionEndRef = this.splitRef(dimensionRange.end);
+				var dimensionRange = this.splitRange(dimension.attrib.ref), dimensionEndRef = this.splitRef(dimensionRange.end || dimensionRange.start);
 
 				dimensionEndRef.row += totalRowsInserted;
 				dimensionEndRef.col = this.numToChar(this.charToNum(dimensionEndRef.col) + totalColumnsInserted);
@@ -531,7 +546,14 @@ class ExcelTemplate {
 	// Helpers
 	// Write back the new shared strings list
 	async writeSharedStrings() {
-		let parseTextSharedStrPath = await this.archive.file(this.sharedStringsPath).async('string');
+		if (!this.sharedStringsPath)
+			return;
+
+		let sharedStringsFile = this.archive.file(this.sharedStringsPath);
+		if (sharedStringsFile === null)
+			throw new Error('Shared strings file not found: ' + this.sharedStringsPath);
+
+		let parseTextSharedStrPath = await sharedStringsFile.async('string');
 		var root = etree.parse(parseTextSharedStrPath).getroot(), children = root.getchildren();
 
 		root.delSlice(0, children.length);
@@ -558,6 +580,26 @@ class ExcelTemplate {
 		this.sharedStringsLookup[s] = idx;
 
 		return idx;
+	}
+
+	// Get the text from an inline string cell.
+	getInlineString(cell) {
+		var inlineString = cell.find('is');
+
+		if (inlineString === null)
+			return '';
+
+		var string = '';
+
+		inlineString.findall('t').forEach(tmp => {
+			string += tmp.text || '';
+		});
+
+		inlineString.findall('r/t').forEach(tmp => {
+			string += tmp.text || '';
+		});
+
+		return string;
 	}
 
 	// Get the number of a shared string, adding a new one if necessary.
@@ -788,10 +830,6 @@ class ExcelTemplate {
 
 	//Perform substitution in hyperlinks
 	async substituteHyperlinks(rels, substitutions) {
-		let parseTextLink = await this.archive.file(this.sharedStringsPath).async('string');
-
-		etree.parse(parseTextLink).getroot();
-
 		if (rels === null)
 			return;
 		
@@ -1036,9 +1074,34 @@ class ExcelTemplate {
 
 	// Insert a substitution value into a cell (c tag)
 	insertCellValue(cell, substitution) {
-		var cellValue = cell.find('v'), stringified = this.stringify(substitution);
+		var cellValue = cell.find('v'), stringified = this.stringify(substitution), isInlineString = cell.attrib.t === 'inlineStr';
+		var isFormula = typeof substitution === 'string' && substitution[0] === '=';
 
-		if (typeof substitution === 'string' && substitution[0] === '=') {
+		if (isInlineString) {
+			var inlineString = cell.find('is');
+
+			if (inlineString !== null)
+				cell.remove(inlineString);
+
+			// Null and missing values stringify to empty text, just like shared strings.
+			if (!isFormula && typeof substitution !== 'number' && typeof substitution !== 'boolean' && !(substitution instanceof Date)) {
+				if (cellValue !== null)
+					cell.remove(cellValue);
+
+				inlineString = etree.SubElement(cell, 'is');
+				var text = etree.SubElement(inlineString, 't', { 'xml:space': 'preserve' });
+				text.text = stringified;
+
+				return stringified;
+			}
+		}
+
+		if (cellValue === null) {
+			cellValue = new etree.Element('v');
+			cell.append(cellValue);
+		}
+
+		if (isFormula) {
 			//substitution, started with '=' is a formula substitution
 			var formula = new etree.Element('f');
 			formula.text = substitution.substr(1);
@@ -1069,7 +1132,8 @@ class ExcelTemplate {
 		
 		let newString = string.replace(placeholder.placeholder, this.stringify(substitution));
 
-		cell.attrib.t = 's';
+		if (cell.attrib.t !== 'inlineStr')
+			cell.attrib.t = 's';
 		
 		return this.insertCellValue(cell, newString);
 	}
@@ -1118,6 +1182,9 @@ class ExcelTemplate {
 			// Credit: kennycreeper - Fix merge cells style
 			const mergeCell = this.sheet.root.findall('mergeCells/mergeCell').find(c => this.splitRange(c.attrib.ref).start === cell.attrib.r);
 
+			// Later rows must start from the template, before the first value changes its type.
+			const templateCell = this.cloneElement(cell);
+
 			substitution.forEach((element, idx) => {
 				var newRow, newCell, newCellsInsertedOnNewRow = 0, newCells = [], value = _get(element, key, '');
 
@@ -1142,7 +1209,7 @@ class ExcelTemplate {
 					}
 
 					// Create a new cell
-					newCell = this.cloneElement(cell);
+					newCell = this.cloneElement(templateCell);
 
 					newCell.attrib.r = this.joinRef({
 						row: newRow.attrib.r,

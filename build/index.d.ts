@@ -81,6 +81,7 @@ export class ExcelTemplate {
     build(options: any): Promise<string | number[] | ArrayBuffer | Uint8Array<ArrayBufferLike> | Blob | Buffer<ArrayBufferLike>>;
     writeSharedStrings(): Promise<void>;
     addSharedString(s: any): number;
+    getInlineString(cell: any): string;
     stringIndex(s: any): any;
     replaceString(oldString: any, newString: any): any;
     loadSheets(prefix: any, workbook: any, workbookRels: any): any[];

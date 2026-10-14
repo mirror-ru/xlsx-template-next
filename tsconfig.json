@@ -10,6 +10,7 @@
     "noImplicitAny": false,
     "alwaysStrict": true,
     "esModuleInterop": true,
+    "rootDir": "./src",
     "outDir": "build",
     "sourceMap": false,
   }, 

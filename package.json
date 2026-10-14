@@ -58,7 +58,7 @@
       "cobertura"
     ],
     "transform": {
-      ".(js|ts|tsx)": "ts-jest"
+      "\\.tsx?$": "ts-jest"
     },
     "testRegex": "(/__tests__/.*|-(test|spec))\\.(ts|tsx|js)$",
     "moduleFileExtensions": [

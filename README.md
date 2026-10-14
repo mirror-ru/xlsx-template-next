@@ -2,15 +2,16 @@
 
 [![npm version](https://badge.fury.io/js/xlsx-template-next.svg)](https://badge.fury.io/js/xlsx-template-next) ![Downloads](https://img.shields.io/npm/dm/xlsx-template-next.svg)
 
-This module provides a means of generating Excel reports (i.e. not CSV
-files) in NodeJS applications.
+Generate Excel (`.xlsx`) reports from templates created in Excel.
 
 ## Installation
 
 ```sh
-# with npm
-$ npm i xlsx-template-next
+npm i xlsx-template-next
 ```
+
+Node.js 18 or newer is required.
+
 ## Basic template
 
 From:
@@ -23,10 +24,17 @@ To:
 
 ## Basic usage
 
-Loading a document by filename:
+Create `template.xlsx` in Excel with placeholders such as `${extractDate}`,
+`${dates}`, `${table:people.name}`, and `${table:people.age}` in its cells.
+The [Tags](#tags) section explains how to lay them out.
+
+Save the following code as `main.mjs` beside the template. After installing the
+package, run `node main.mjs` from that directory. It loads the template, fills
+one sheet, and writes `output.xlsx`:
+
 ```js
-import { ExcelTemplate } from 'xlsx-template-next'
-import fs from 'fs'
+import { ExcelTemplate } from 'xlsx-template-next';
+import fs from 'node:fs';
 
 async function main() {
 	const template = new ExcelTemplate();
@@ -35,10 +43,10 @@ async function main() {
 
 	await template.process(1, {
 		extractDate: new Date(),
-		dates: [ 
-			new Date('2013-06-01'), 
-			new Date('2013-06-02'), 
-			new Date('2013-06-03')
+		dates: [
+			new Date('2023-06-01'),
+			new Date('2023-06-02'),
+			new Date('2023-06-03')
 		],
 		people: [
 			{ name: 'John Smith', age: 20 },
@@ -52,24 +60,57 @@ async function main() {
 main();
 ```
 
-Loading a document from buffer:
+Use the shorter processing examples below in place of the `process(...)` block
+inside `main()`, after `load()` and before `build()`. Where only a `data` object
+is shown, pass it as the second argument to `process()`. Replace sample sheet
+names such as `Invoice` and `Report` with names that exist in your workbook.
+Constructor options are set when creating the `ExcelTemplate` instance, before
+loading the file.
+
+### Choosing a sheet
+
+To fill a cell containing `${invoiceNumber}` on a sheet named `Invoice`:
+
 ```js
-import { ExcelTemplate } from 'xlsx-template-next'
-import fs from 'fs'
+const data = { invoiceNumber: 'INV-001' };
+await template.process('Invoice', data);
+```
+
+`process()` accepts a sheet name or number. A number first matches the sheet's
+internal ID; if no ID matches, it is treated as a one-based position. After
+sheets have been reordered, IDs and positions can differ, so using a name is
+the clearest choice.
+
+Alternatively, use the same `data` object to fill all sheets:
+
+```js
+await template.processAll(data);
+```
+
+The sheets can have different placeholders; include their values in `data`.
+Missing values are replaced with empty text.
+
+### Loading from a buffer
+
+`load()` also accepts a `Buffer`, for example when the template was received
+from an HTTP request or read from storage:
+
+```js
+import { ExcelTemplate } from 'xlsx-template-next';
+import fs from 'node:fs';
 
 async function main() {
 	const template = new ExcelTemplate();
-
 	const buffer = fs.readFileSync('./template.xlsx');
 
 	await template.load(buffer);
 
 	await template.process(1, {
 		extractDate: new Date(),
-		dates: [ 
-			new Date('2013-06-01'), 
-			new Date('2013-06-02'), 
-			new Date('2013-06-03')
+		dates: [
+			new Date('2023-06-01'),
+			new Date('2023-06-02'),
+			new Date('2023-06-03')
 		],
 		people: [
 			{ name: 'John Smith', age: 20 },
@@ -87,10 +128,8 @@ main();
 
 ### Scalars
 
-Simple placholders take the format `${name}`. Here, `name` is the name of a
-key in the placeholders map. The value of this placholder here should be a
-scalar, i.e. not an array or object. The placeholder may appear on its own in a
-cell, or as part of a text string. For example:
+Use `${name}` for a single value. The placeholder may occupy a whole cell or be
+part of its text. For example:
 
     | Extracted on: | ${extractDate} |
 
@@ -98,34 +137,47 @@ might result in (depending on date formatting in the second cell):
 
     | Extracted on: | Jun-01-2023 |
 
-Here, `extractDate` may be a date and the second cell may be formatted as a
-number.
+For a `Date` value, put the placeholder alone in the cell and apply a date
+format in Excel. To include a date inside text, pass an already formatted
+string instead.
 
-Inside scalars there possibility to use array indexers. 
-For example: 
+Array indexes are supported:
 
 Given data
 
 ```js
-let data = { 
+const data = {
 	extractDates: [ 'Jun-01-2022', 'Jun-01-2023' ]
 };
 ```
 
-which will be applied to following template
+Use it in a template as:
 
     | Extracted on: | ${extractDates[0]} |
 
-will results in the 
+Result:
 
     | Extracted on: | Jun-01-2022 |
 
+### Formulas
+
+Put `${total}` alone in cell B11 of the `Report` sheet, then supply a string
+beginning with `=`:
+
+```js
+await template.process('Report', {
+	total: '=SUM(B2:B10)'
+});
+```
+
+The library writes the formula but does not calculate its result. Recalculate
+the generated workbook in Excel to obtain the value. Inserting rows or columns
+does not rewrite the references inside the formula (see [Limitations](#limitations)).
+
 ### Columns
 
-You can use arrays as placeholder values to indicate that the placeholder cell
-is to be replicated across columns. In this case, the placeholder cannot appear
-inside a text string - it must be the only thing in its cell. For example,
-if the placehodler value `dates` is an array of dates:
+An array in a placeholder creates one cell per item across columns. The
+placeholder must be the only content of its cell. For example:
 
     | ${dates} |
 
@@ -135,89 +187,96 @@ might result in:
 
 ### Tables
 
-Finally, you can build tables made up of multiple rows. In this case, each
-placeholder should be prefixed by `table:` and contain both the name of the
-placeholder variable (a list of objects) and a key (in each object in the list).
-For example:
+For a table, put `${table:items.field}` placeholders in adjacent cells on one
+template row. Each placeholder must occupy its whole cell. The first item
+fills that row; further items create additional rows:
 
-    | Name                 | Age                 |
+    | Name                | Age                 |
     | ${table:people.name} | ${table:people.age} |
 
-If the replacement value under `people` is an array of objects, and each of
-those objects have keys `name` and `age`, you may end up with something like:
+With an array of `{ name, age }` objects in `people`, the result is:
 
     | Name        | Age |
     | John Smith  | 20  |
     | Bob Johnson | 22  |
 
-If a particular value is an array, then it will be repeated across columns as
-above.
+An array field inside a table row is repeated across columns in the same way.
+An empty table array clears its placeholder cells but keeps the template row.
 
 ### Images
 
-You can insert images with   
+Put the image placeholder alone in its cell:
 
     | My image: | ${image:imageName} |
 
 Given data
 
 ```js
-let data = { 
-	imageName: 'helloImage.jpg' 
+const data = {
+	imageName: 'helloImage.jpg'
 };
-```  
+```
 
-You can insert a list of images with   
+For images in a table, use:
 
     | My images | ${table:images.name:image} |
 
 Given data
 
 ```js
-let data = { 
-    images: [ 
-      { name: 'helloImage1.jpg' }, 
-      { name: 'helloImage2.jpg' } 
-    ]
+const data = {
+	images: [
+		{ name: 'helloImage1.jpg' },
+		{ name: 'helloImage2.jpg' }
+	]
 };
-``` 
+```
 
-Supported image format in given data: 
-- Base64 string
-- Base64 Buffer
-- Absolute path file
-- relative path file (absolute is prior to relative in test)
+Image data can be a `Buffer` containing image bytes, a raw base64 string
+(without a `data:image/...;base64,` prefix), or a path to a local image file.
+Image URLs are not downloaded automatically.
 
-You can pass imageRootPath option for setting the root folder for your images.  
+For example, with `${image:imageName}` in a cell on `Report`, read the image
+into a `Buffer` using the `fs` import from the full example:
 
 ```js
-let option = { 
-	imageRootPath: '/path/to/your/image/dir' 
+await template.process('Report', {
+	imageName: fs.readFileSync('./logo.png')
+});
+```
+
+Relative image paths are resolved from the Node.js process's working
+directory. Set `imageRootPath` to use a different directory and pass image
+filenames relative to it:
+
+```js
+const option = {
+	imageRootPath: '/path/to/your/image/dir'
 };
-///...  
 const template = new ExcelTemplate(option);
 ```
 
-If the image Placeholders is in standard cell, image is insert normaly  
-If the image Placeholders is in merge cell, image feet (at the best) the size of the merge cell.
+An image in a merged cell is sized to fit that merged area.
 
-You can pass imageRatio option for adjust the ratio image (in percent and for standard cell - not applied on merge cell)
+Use `imageRatio` to scale image width and height in ordinary cells (percentage;
+default `100`). This option does not affect images in merged cells:
 
 ```js
-let option = { 
-	imageRatio: 75.4 
-};  
-///...  
+const option = {
+	imageRatio: 75.4
+};
 const template = new ExcelTemplate(option);
 ```
 
-### Sheet helpers
+## Sheet helpers
 
-You can copy or remove sheets and hide columns by their zero-based indexes:
+You can copy or remove sheets by name or numeric ID, and hide columns by their
+zero-based indexes. Perform these operations after `load()` and before `build()`:
 
 ```js
-await template.copySheet('Sheet1', 'Copy of Sheet1');
-await template.hideCols('Sheet1', [1, 3]); // hide columns B and D
+const sheetName = 'Sheet1'; // replace with the name in your workbook
+await template.copySheet(sheetName, 'Copy of Sheet1');
+await template.hideCols(sheetName, [1, 3]); // hide columns B and D
 await template.deleteSheet('Copy of Sheet1');
 ```
 
@@ -226,41 +285,52 @@ the requested columns, preserving the widths and styles of adjacent columns.
 `copySheet` accepts a sheet name or numeric ID; the new name is optional.
 Local defined names and comment threads are copied with the sheet.
 
-At this stage, `data` is a string blob representing the compressed archive that
-is the `.xlsx` file (that's right, a `.xlsx` file is a zip file of XML files,
-if you didn't know). You can send this back to a client, store it to disk,
-attach it to an email or do whatever you want with it.
+## Saving the result
 
-You can pass options to `generate()` to set a different return type. use
-`{ type: 'uint8array' }` to generate a `Uint8Array`, `arraybuffer`, `blob`,
-`nodebuffer` to generate an `ArrayBuffer`, `Blob` or `nodebuffer`, or
-`base64` to generate a base64-encoded string. Default: `{ type: 'uint8array' }`
+Call `build()` after processing the sheets and making any sheet changes.
+Without options it returns a `Uint8Array` containing the `.xlsx` file, which
+can be passed directly to `fs.writeFileSync()` as in the full examples.
 
-## Caveats
+For a Node.js `Buffer`, pass an options object:
 
-* The spreadsheet must be saved in `.xlsx` format. `.xls`, `.xlsb` or `.xlsm`
-  won't work.
-* Column (array) and table (array-of-objects) insertions cause rows and cells to
-  be inserted or removed. When this happens, only a limited number of
-  adjustments are made:
-    * Merged cells and named cells/ranges to the right of cells where insertions
-      or deletions are made are moved right or left, appropriately. This may
-      not work well if cells are merged across rows, unless all rows have the
-      same number of insertions.
-    * Merged cells, named tables or named cells/ranges below rows where further
-      rows are inserted are moved down.
-  Formulae are not adjusted.
-* As a corollary to this, it is not always easy to build formulae that refer
-  to cells in a table (e.g. summing all rows) where the exact number of rows
-  or columns is not known in advance. There are two strategies for dealing
-  with this:
-    * Put the table as the last (or only) thing on a particular sheet, and
-      use a formula that includes a large number of rows or columns in the
-      hope that the actual table will be smaller than this number.
-    * Use named tables. When a placeholder in a named table causes columns or
-      rows to be added, the table definition (i.e. the cells included in the
-      table) will be updated accordingly. You can then use things like
-      `TableName[ColumnName]` in your formula to refer to all values in a given
-      column in the table as a logical range.
-* Placeholders only work in simple cells and tables, pivot tables or
-  other such things.
+```js
+const output = await template.build({ type: 'nodebuffer' });
+fs.writeFileSync('./output.xlsx', output);
+```
+
+Other output types include `uint8array`, `arraybuffer`, `blob`, and `base64`.
+Whenever you pass an options object, include `type` explicitly.
+
+## Limitations
+
+- The template must be saved as `.xlsx`. Formats `.xls`, `.xlsb`, and `.xlsm`
+  are not supported.
+- An array expands across cells in its own row, shifting subsequent cells
+  right; an empty array removes the placeholder cell and shifts them left.
+  A table expands downwards from the template row. An empty table clears its
+  placeholders without removing the row. Only limited adjustments to other
+  workbook structures are made:
+
+  - Merged ranges and ordinary named cells/ranges starting to the right of the
+    array on the same row are shifted right or left.
+  - Merged ranges, Excel tables, and ordinary named cells/ranges below an
+    expanded table are moved down. A merged range that starts on the template
+    row is copied to the generated rows.
+  - Hyperlinks anchored to moved cells are moved with them.
+  - Ranges spanning several rows or crossing an insertion point need manual
+    checking. In particular, merged cells across multiple rows may become
+    invalid when those rows expand by different amounts. These updates are
+    not a general-purpose rewrite of every reference in the workbook.
+- Formula references are not rewritten when rows or columns are inserted. If a
+  formula must refer to a table with an unknown number of rows or columns,
+  either:
+
+  - place the table at the end of a sheet and use a sufficiently large formula
+    range, keeping other data and the formula cell outside that range; or
+  - use an Excel table. Its range is expanded with the generated rows, so a
+    structured reference such as `TableName[ColumnName]` includes all values.
+    This means an actual named Excel table created in the template, not just
+    cells styled to look like a table.
+- Placeholder substitution is supported in ordinary cells and Excel tables,
+  not inside pivot tables or other specialised Excel objects. The library does
+  not refresh pivot tables.

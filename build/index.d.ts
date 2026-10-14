@@ -37,10 +37,12 @@ export class ExcelTemplate {
     deleteSheet(sheetName: any): Promise<this>;
     /**
      * Clone sheets in current workbook template
+     * @param {string|number} sheetName
+     * @param {string} [copyName]
      */
-    copySheet(sheetName: any, copyName: any): Promise<this>;
+    copySheet(sheetName: string | number, copyName?: string): Promise<this>;
     /**
-     *  Partially rebuild after copy/delete sheets
+     * Persist workbook changes without changing relationship IDs or their targets.
      */
     _rebuild(): void;
     /**
@@ -102,6 +104,8 @@ export class ExcelTemplate {
     loadDrawing(sheet: any, sheetFilename: any, rels: any): Promise<{
         filename: string;
         root: any;
+        relFilename: string;
+        relRoot: any;
     }>;
     addContentType(partName: any, contentType: any): void;
     initDrawing(sheet: any, rels: any): {
@@ -157,6 +161,12 @@ export class ExcelTemplate {
     joinRange(range: any): string;
     pushRight(workbook: any, sheet: any, currentCell: any, numCols: any): void;
     pushDown(workbook: any, sheet: any, tables: any, currentRow: any, numRows: any): void;
+    /**
+     * Hide columns by their zero-based indexes, as in the upstream API.
+     * @param {string|number} sheetName
+     * @param {number[]} hideItemIndexes
+     */
+    hideCols(sheetName: string | number, hideItemIndexes: number[]): Promise<this>;
     getWidthCell(numCol: any, sheet: any): number;
     getWidthMergeCell(mergeCell: any, sheet: any): number;
     getHeightCell(numRow: any, sheet: any): number;
@@ -188,6 +198,7 @@ export class ExcelTemplate {
      * @returns {number}
      */
     findMaxFileId(fileNameRegex: RegExp, idRegex: RegExp): number;
+    generateUUID(): string;
     cellInMergeCells(cell: any, mergeCell: any): boolean;
     /**
      * @param {string} str

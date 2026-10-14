@@ -7,6 +7,12 @@ const sizeOf = require('image-size').imageSize;
 const fs = require('fs');
 const etree = require('elementtree');
 const JSZip = require('jszip');
+const { randomBytes } = require('crypto');
+
+// Package paths use forward slashes on every platform; targets may be root-relative.
+function resolvePartPath(source, target) {
+	return path.posix.normalize(target.startsWith('/') ? target.slice(1) : path.posix.join(path.posix.dirname(source), target));
+}
 
 const DOCUMENT_RELATIONSHIP       = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument';
 const CALC_CHAIN_RELATIONSHIP     = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain';
@@ -81,6 +87,30 @@ class ExcelTemplate {
 		var sheet = await this.loadSheet(sheetName);
 
 		var sh = this.workbook.find("sheets/sheet[@sheetId='" + sheet.id + "']");
+		var sheets = this.workbook.findall('sheets/sheet');
+		var sheetIndex = sheets.indexOf(sh);
+		var definedNamesParent = this.workbook.find('definedNames');
+
+		// A local defined name is tied to the zero-based position of a sheet.
+		// Remove names belonging to the deleted sheet and shift the following ones.
+		if (definedNamesParent !== null) {
+			var definedNamesToRemove = [];
+
+			this.workbook.findall('definedNames/definedName').forEach(element => {
+				if (element.attrib.localSheetId === undefined)
+					return;
+
+				var localSheetId = parseInt(element.attrib.localSheetId, 10);
+				if (localSheetId === sheetIndex) {
+					definedNamesToRemove.push(element);
+				} else if (localSheetId > sheetIndex) {
+					element.attrib.localSheetId = (localSheetId - 1).toString();
+				}
+			});
+
+			definedNamesToRemove.forEach(element => definedNamesParent.remove(element));
+		}
+
 		this.workbook.find('sheets').remove(sh);
 
 		var rel = this.workbookRels.find("Relationship[@Id='" + sh.attrib['r:id'] + "']");
@@ -93,92 +123,161 @@ class ExcelTemplate {
 
 	/**
 	 * Clone sheets in current workbook template
+	 * @param {string|number} sheetName
+	 * @param {string} [copyName]
 	 */
 	async copySheet(sheetName, copyName) {
-		var sheet = await this.loadSheet(sheetName); //filename, name , id, root
-		var newSheetIndex = (this.workbook.findall("sheets/sheet").length + 1).toString();
-		var fileName = 'worksheets' + '/' + 'sheet' + newSheetIndex + '.xml';
-		var arcName = this.prefix + '/' + fileName;
+		const sheet = await this.loadSheet(sheetName);
+		const sheets = this.workbook.findall('sheets/sheet');
+		const sourceIndex = sheets.findIndex(item => Number(item.attrib.sheetId) === sheet.id);
+		const newSheetIndex = sheets.length + 1;
+		const existingNames = new Set(sheets.map(item => item.attrib.name.toLowerCase()));
+		let finalSheetName = copyName;
+		if (!finalSheetName) {
+			let suffix = newSheetIndex;
+			while (existingNames.has(('Sheet' + suffix).toLowerCase()))
+				suffix++;
+			finalSheetName = 'Sheet' + suffix;
+		}
+		if (typeof finalSheetName !== 'string' || finalSheetName.length > 31 ||
+			/[:\\/?*\[\]]/.test(finalSheetName) || /^'|'$/.test(finalSheetName))
+			throw new Error('Invalid sheet name: ' + finalSheetName);
+		if (existingNames.has(finalSheetName.toLowerCase()))
+			throw new Error('Sheet already exists: ' + finalSheetName);
 
-		// Copy sheet file
-		this.archive.file(arcName, etree.tostring(sheet.root));
+		// Prepare all parts before modifying the archive, so a failed read leaves it intact.
+		const parts = new Map();
+		const contentTypes = [];
+		const relsPath = filename => path.posix.join(path.posix.dirname(filename), '_rels', path.posix.basename(filename) + '.rels');
+		const unusedPartPath = filename => {
+			const extension = path.posix.extname(filename);
+			const base = filename.slice(0, -extension.length).replace(/\d+$/, '');
+			let suffix = newSheetIndex;
+			let candidate;
+			do {
+				candidate = base + suffix++ + extension;
+			} while (this.archive.files[candidate] || this.archive.files[relsPath(candidate)] || parts.has(candidate) ||
+				this.contentTypes.findall('Override').some(item => item.attrib.PartName === '/' + candidate));
+			return candidate;
+		};
+		const arcName = unusedPartPath(path.posix.join(this.prefix, 'worksheets/sheet.xml'));
+		const sheetDirectory = path.posix.dirname(arcName);
+		parts.set(arcName, await this.archive.file(sheet.filename).async('nodebuffer'));
+		contentTypes.push([arcName, 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml']);
 
-		// copy sheet name in workbook
-		var newSheet = etree.SubElement(this.workbook.find('sheets'), 'sheet');
-
-		newSheet.attrib.name = copyName || 'Sheet' + newSheetIndex;
-		newSheet.attrib.sheetId = newSheetIndex;
-		newSheet.attrib['r:id'] = 'rId' + newSheetIndex;
-
-		// Copy definedName if any
-		this.workbook.findall('definedNames/definedName').forEach(element => {
-			if (element.text && element.text.split('!').length && element.text.split('!')[0] == sheetName) {
-				var newDefinedName = etree.SubElement(this.workbook.find('definedNames'), 'definedName', element.attrib);
-
-				newDefinedName.text = `${copyName}!${element.text.split('!')[1]}`;
-				newDefinedName.attrib.localSheetId = newSheetIndex - 1;
+		const sourceRels = await this.loadSheetRels(sheet.filename);
+		const newRelsRoot = this.cloneElement(sourceRels.root);
+		const copiedTypes = new Map([
+			['http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments', 'application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml'],
+			['http://schemas.microsoft.com/office/2017/10/relationships/threadedComment', 'application/vnd.ms-excel.threadedcomments+xml'],
+			['http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing', 'application/vnd.openxmlformats-officedocument.vmlDrawing']
+		]);
+		const commentIds = new Map();
+		const remapId = id => {
+			const key = id.replace(/[{}]/g, '').toLowerCase();
+			if (!commentIds.has(key))
+				commentIds.set(key, this.generateUUID());
+			const value = commentIds.get(key);
+			return id.startsWith('{') ? '{' + value + '}' : value;
+		};
+		const rewriteCommentIds = node => {
+			const tag = node.tag.split(':').pop();
+			if (tag === 'threadedComment') {
+				for (const attr of ['id', 'parentId']) {
+					if (node.attrib[attr])
+						node.attrib[attr] = remapId(node.attrib[attr]);
+				}
+			} else if (tag === 'comment') {
+				for (const attr of Object.keys(node.attrib)) {
+					if (attr.endsWith(':uid'))
+						node.attrib[attr] = remapId(node.attrib[attr]);
+				}
+			} else if (tag === 'author' && /^tc=\{[0-9a-f-]{36}\}$/i.test(node.text || '')) {
+				node.text = 'tc=' + remapId(node.text.slice(3));
 			}
+			node.getchildren().forEach(rewriteCommentIds);
+		};
+		for (const relationship of newRelsRoot.findall('Relationship')) {
+			const target = relationship.attrib.Target;
+			if (!target || relationship.attrib.TargetMode === 'External')
+				continue;
+			const sourcePath = resolvePartPath(sheet.filename, target);
+			let copiedPath = sourcePath;
+			if (copiedTypes.has(relationship.attrib.Type)) {
+				const sourceFile = this.archive.file(sourcePath);
+				if (sourceFile === null)
+					throw new Error('Related sheet part not found: ' + sourcePath);
+				copiedPath = unusedPartPath(sourcePath);
+				let content = await sourceFile.async('string');
+				if (relationship.attrib.Type.endsWith('/vmlDrawing')) {
+					content = content.replace(/data="\d+"/, 'data="' + newSheetIndex + '"');
+				} else {
+					const root = etree.parse(content).getroot();
+					rewriteCommentIds(root);
+					content = etree.tostring(root);
+				}
+				parts.set(copiedPath, content);
+				contentTypes.push([copiedPath, copiedTypes.get(relationship.attrib.Type)]);
+				// VML can have its own image relationships. The copy stays in the same directory.
+				const sourcePartRels = this.archive.file(relsPath(sourcePath));
+				if (sourcePartRels !== null)
+					parts.set(relsPath(copiedPath), await sourcePartRels.async('nodebuffer'));
+			}
+			relationship.attrib.Target = path.posix.relative(sheetDirectory, copiedPath);
+		}
+		if (newRelsRoot.findall('Relationship').length)
+			parts.set(relsPath(arcName), etree.tostring(newRelsRoot));
+
+		const newDefinedNames = this.workbook.findall('definedNames/definedName')
+			.filter(element => Number(element.attrib.localSheetId) === sourceIndex && element.attrib.localSheetId !== undefined)
+			.map(element => {
+				const copy = this.cloneElement(element);
+				copy.attrib.localSheetId = String(newSheetIndex - 1);
+				// Skip formula string literals; quote the new name and escape apostrophes.
+				copy.text = (copy.text || '').replace(/"(?:[^"]|"")*"|('(?:[^']|'')+'|(?:\[[^\]]+\])?[A-Za-z_\u0080-\uFFFF][A-Za-z0-9_.\u0080-\uFFFF]*)!/g,
+					(match, name) => {
+						if (!name)
+							return match;
+						const unquoted = name.startsWith("'") ? name.slice(1, -1).replace(/''/g, "'") : name;
+						return unquoted.toLowerCase() === sheet.name.toLowerCase()
+							? "'" + finalSheetName.replace(/'/g, "''") + "'!"
+							: match;
+					});
+				return copy;
+			});
+		const usedRelIds = new Set(this.workbookRels.findall('Relationship').map(item => item.attrib.Id));
+		let relIndex = 1;
+		while (usedRelIds.has('rId' + relIndex))
+			relIndex++;
+		const relId = 'rId' + relIndex;
+
+		for (const [filename, content] of parts)
+			this.archive.file(filename, content);
+		for (const [filename, contentType] of contentTypes)
+			this.addContentType('/' + filename, contentType);
+		etree.SubElement(this.workbook.find('sheets'), 'sheet', {
+			name: finalSheetName, sheetId: String(newSheetIndex), 'r:id': relId
 		});
-
-		var newRel = etree.SubElement(this.workbookRels, 'Relationship');
-
-		newRel.attrib.Type = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet';
-		newRel.attrib.Target = fileName;
-
-		//Copy rels sheet - TODO : Maybe we can copy also the 'Target' files in rels, but Excel make this automaticly
-		var relFileName = 'worksheets' + '/_rels/' + 'sheet' + newSheetIndex + '.xml.rels';
-		var relArcName = this.prefix + '/' + relFileName;
-
-		this.archive.file(relArcName, etree.tostring((await this.loadSheetRels(sheet.filename)).root));
-
+		etree.SubElement(this.workbookRels, 'Relationship', {
+			Id: relId,
+			Type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet',
+			Target: path.posix.relative(this.prefix, arcName)
+		});
+		for (const definedName of newDefinedNames)
+			this.workbook.find('definedNames').append(definedName);
+		this.archive.file('[Content_Types].xml', etree.tostring(this.contentTypes));
 		this._rebuild();
-
 		return this;
 	}
 
 	/**
-	 *  Partially rebuild after copy/delete sheets
+	 * Persist workbook changes without changing relationship IDs or their targets.
 	 */
 	_rebuild() {
-		//each <sheet> 'r:id' attribute in '\xl\workbook.xml'
-		//must point to correct <Relationship> 'Id' in xl\_rels\workbook.xml.rels
-		var order = ['worksheet', 'theme', 'styles', 'sharedStrings'];
-
-		this.workbookRels.findall("*")
-			.sort((rel1, rel2) => {
-				var index1 = order.indexOf(path.basename(rel1.attrib.Type));
-				var index2 = order.indexOf(path.basename(rel2.attrib.Type));
-
-				// If the attrib.Type is not in the order list, go to the end of sort
-				// Maybe we can do it more gracefully with the boolean operator
-				if (index1 < 0 && index2 >= 0)
-					return 1; // rel1 go after rel2
-
-				if (index1 >= 0 && index2 < 0)
-					return -1; // rel1 go before rel2
-
-				if (index1 < 0 && index2 < 0)
-					return 0; // change nothing
-
-				if ((index1 + index2) == 0) {
-					if (rel1.attrib.Id && rel2.attrib.Id)
-						return rel1.attrib.Id.substring(3) - rel2.attrib.Id.substring(3);
-
-					return rel1._id - rel2._id;
-				}
-
-				return index1 - index2;
-			})
-			.forEach((item, index) => {
-				item.attrib.Id = 'rId' + (index + 1);
-			});
-
 		this.workbook.findall('sheets/sheet').forEach((item, index) => {
-			item.attrib['r:id'] = 'rId' + (index + 1);
 			item.attrib.sheetId = (index + 1).toString();
 		});
-
-		this.archive.file(this.prefix + '/' + '_rels' + '/' + path.basename(this.workbookPath) + '.rels', etree.tostring(this.workbookRels));
+		this.archive.file(this.prefix + '/_rels/' + path.basename(this.workbookPath) + '.rels', etree.tostring(this.workbookRels));
 		this.archive.file(this.workbookPath, etree.tostring(this.workbook));
 		this.sheets = this.loadSheets(this.prefix, this.workbook, this.workbookRels);
 	}
@@ -320,13 +419,13 @@ class ExcelTemplate {
 
 		var rels = await this.loadSheetRels(sheet.filename);
 
-		sheetData.findall('row').forEach(row => {
+		for (const row of sheetData.findall('row')) {
 			row.attrib.r = currentRow = this.getCurrentRow(row, totalRowsInserted);
 			rows.push(row);
 
 			var cells = [], cellsInserted = 0, newTableRows = [], cellsForsubstituteTable = []; // Contains all the row cells when substitute tables
 
-			row.findall('c').forEach(cell => {
+			for (const cell of row.findall('c')) {
 				var appendCell = true;
 
 				cell.attrib.r = this.getCurrentCell(cell, currentRow, cellsInserted);
@@ -343,17 +442,17 @@ class ExcelTemplate {
 					}
 
 					if (string === undefined)
-						return;
+						continue;
 
 					// Loop over placeholders
-					this.extractPlaceholders(string).forEach(placeholder => {
+					for (const placeholder of this.extractPlaceholders(string)) {
 						// Only substitute things for which we have a substitution
 						var substitution = _get(substitutions, placeholder.name, ''), newCellsInserted = 0;
 						
 						if (placeholder.full && placeholder.type === 'table' && Array.isArray(substitution)) {
 							if (placeholder.subType === 'image' && drawing == null) {
 								if (rels) {
-									drawing = this.loadDrawing(sheet.root, sheet.filename, rels.root);
+									drawing = await this.loadDrawing(sheet.root, sheet.filename, rels.root);
 								} else {
 									console.log('Need to implement initRels. Or init this with Excel');
 								}
@@ -395,7 +494,7 @@ class ExcelTemplate {
 						} else if (placeholder.full && placeholder.type === 'image') {
 							if (rels != null) {
 								if (drawing == null)
-									drawing = this.loadDrawing(sheet.root, sheet.filename, rels.root);
+									drawing = await this.loadDrawing(sheet.root, sheet.filename, rels.root);
 								
 								string = this.substituteImage(cell, string, placeholder, substitution, drawing);
 							} else {
@@ -407,13 +506,13 @@ class ExcelTemplate {
 
 							string = this.substituteScalar(cell, string, placeholder, substitution);
 						}
-					});
+					}
 				}
 
 				// if we are inserting columns, we may not want to keep the original cell anymore
 				if (appendCell)
 					cells.push(cell);
-			});
+			}
 
 			// We may have inserted columns, so re-build the children of the row
 			this.replaceChildren(row, cells);
@@ -433,7 +532,7 @@ class ExcelTemplate {
 					if (drawing == null) {
 						// Maybe we can load drawing at the begining of function and remove all the this.loadDrawing() along the function ?
 						// If we make this, we create all the time the drawing file (like rels file at this moment)
-						drawing = this.loadDrawing(sheet.root, sheet.filename, rels.root);
+						drawing = await this.loadDrawing(sheet.root, sheet.filename, rels.root);
 					}
 
 					if (drawing != null)
@@ -476,7 +575,7 @@ class ExcelTemplate {
 
 				this.pushDown(this.workbook, sheet.root, namedTables, currentRow, newTableRows.length);
 			}
-		});
+		}
 
 		// We may have inserted rows, so re-build the children of the sheetData
 		this.replaceChildren(sheetData, rows);
@@ -633,7 +732,7 @@ class ExcelTemplate {
 		var sheets = [];
 
 		workbook.findall('sheets/sheet').forEach(sheet => {
-			var sheetId = sheet.attrib.sheetId, relId = sheet.attrib['r:id'], relationship = workbookRels.find("Relationship[@Id='" + relId + "']"), filename = prefix + "/" + relationship.attrib.Target;
+			var sheetId = sheet.attrib.sheetId, relId = sheet.attrib['r:id'], relationship = workbookRels.find("Relationship[@Id='" + relId + "']"), filename = resolvePartPath(prefix + '/workbook.xml', relationship.attrib.Target);
 
 			sheets.push({
 				id: parseInt(sheetId, 10),
@@ -661,10 +760,13 @@ class ExcelTemplate {
 			info = this.sheets[sheet - 1];
 		}
 
-		if (info === null)
+		if (info == null)
 			throw new Error('Sheet ' + sheet + ' not found');
 
-		let parseTextFileName = await this.archive.file(info.filename).async('string');
+		const sheetFile = this.archive.file(info.filename);
+		if (sheetFile === null)
+			throw new Error('Sheet file not found: ' + info.filename);
+		let parseTextFileName = await sheetFile.async('string');
 
 		return {
 			filename: info.filename,
@@ -701,7 +803,7 @@ class ExcelTemplate {
 	
 	// Load Drawing file
 	async loadDrawing(sheet, sheetFilename, rels) {
-		var sheetDirectory = path.dirname(sheetFilename), sheetName = path.basename(sheetFilename), drawing = { filename: '', root: null };
+		var drawing = { filename: '', root: null, relFilename: '', relRoot: null };
 		var drawingPart = sheet.find('drawing');
 		
 		if (drawingPart === null) {
@@ -709,16 +811,31 @@ class ExcelTemplate {
 			return drawing;
 		}
 
-		let parseTextDrawingFilename = await this.archive.file(drawingFilename).async('string');
-		var relationshipId = drawingPart.attrib['r:id'], target = rels.find("Relationship[@Id='" + relationshipId + "']").attrib.Target, drawingFilename = path.join(sheetDirectory, target).replace(/\\/g, '/'), drawingTree = etree.parse(parseTextDrawingFilename);
+		var relationshipId = drawingPart.attrib['r:id'];
+		var drawingRelationship = rels.find("Relationship[@Id='" + relationshipId + "']");
+		if (drawingRelationship === null)
+			throw new Error('Drawing relationship not found: ' + relationshipId);
+
+		var drawingFilename = resolvePartPath(sheetFilename, drawingRelationship.attrib.Target);
+		var drawingFile = this.archive.file(drawingFilename);
+		if (drawingFile === null)
+			throw new Error('Drawing file not found: ' + drawingFilename);
+
+		let parseTextDrawingFilename = await drawingFile.async('string');
+		var drawingTree = etree.parse(parseTextDrawingFilename);
 		
 		drawing.filename = drawingFilename;
 		drawing.root = drawingTree.getroot();
-		drawing.relFilename = path.dirname(drawingFilename) + '/_rels/' + path.basename(drawingFilename) + '.rels';
+		drawing.relFilename = path.posix.join(path.posix.dirname(drawingFilename), '_rels', path.posix.basename(drawingFilename) + '.rels');
 		
-		let parseTextRelFilename = await this.archive.file(drawing.relFilename).async('string');
-		
-		drawing.relRoot = etree.parse(parseTextRelFilename).getroot();
+		var drawingRelFile = this.archive.file(drawing.relFilename);
+		if (drawingRelFile === null) {
+			drawing.relRoot = etree.Element('Relationships');
+			drawing.relRoot.set('xmlns', 'http://schemas.openxmlformats.org/package/2006/relationships');
+		} else {
+			let parseTextRelFilename = await drawingRelFile.async('string');
+			drawing.relRoot = etree.parse(parseTextRelFilename).getroot();
+		}
 		
 		return drawing;
 	}
@@ -1227,6 +1344,7 @@ class ExcelTemplate {
 						this.updateRowSpan(newRow, newCellsInsertedOnNewRow);
 					} else if (placeholder.subType == 'image' && value != '') {
 						this.substituteImage(newCell, placeholder.placeholder, placeholder, value, drawing);
+						newRow.append(newCell);
 					} else {
 						this.insertCellValue(newCell, value);
 
@@ -1512,6 +1630,39 @@ class ExcelTemplate {
 				}
 			}
 		});
+
+		// Hyperlinks are anchored to cells too, so move their refs with inserted columns.
+		sheet.findall('hyperlinks/hyperlink').forEach(hyperlink => {
+			const range = this.splitRange(hyperlink.attrib.ref);
+			const start = this.splitRef(range.start);
+			const end = this.splitRef(range.end || range.start);
+			if (!numCols || currentRow < start.row || currentRow > end.row ||
+				this.charToNum(end.col) <= currentCol)
+				return;
+			const parent = sheet.find('hyperlinks');
+			let position = parent.getchildren().indexOf(hyperlink);
+			const appendRange = (from, to) => {
+				const copy = this.cloneElement(hyperlink);
+				const first = this.joinRef(from), last = this.joinRef(to);
+				copy.attrib.ref = first === last ? first : first + ':' + last;
+				parent.getchildren().splice(position++, 0, copy);
+			};
+			parent.remove(hyperlink);
+			// Array expansion moves cells in this row only. Split a multi-row anchor
+			// so the unaffected rows keep their links at the same coordinates.
+			if (start.row < currentRow)
+				appendRange(start, { ...end, row: currentRow - 1 });
+			const shiftedStart = { ...start, row: currentRow };
+			const shiftedEnd = { ...end, row: currentRow };
+			for (const ref of [shiftedStart, shiftedEnd]) {
+				const col = this.charToNum(ref.col);
+				if (col > currentCol)
+					ref.col = this.numToChar(col + numCols);
+			}
+			appendRange(shiftedStart, shiftedEnd);
+			if (end.row > currentRow)
+				appendRange({ ...start, row: currentRow + 1 }, end);
+		});
 	}
 
 	// Look for any merged cell, named table or named range definitions below
@@ -1606,6 +1757,62 @@ class ExcelTemplate {
 				}
 			}
 		});
+
+		// Hyperlinks below inserted rows must keep pointing at their original cells.
+		sheet.findall('hyperlinks/hyperlink').forEach(hyperlink => {
+			hyperlink.attrib.ref = hyperlink.attrib.ref.split(':').map(value => {
+				const ref = this.splitRef(value);
+				if (ref.row > currentRow)
+					ref.row += numRows;
+				return this.joinRef(ref);
+			}).join(':');
+		});
+	}
+
+	/**
+	 * Hide columns by their zero-based indexes, as in the upstream API.
+	 * @param {string|number} sheetName
+	 * @param {number[]} hideItemIndexes
+	 */
+	async hideCols(sheetName, hideItemIndexes) {
+		if (!Array.isArray(hideItemIndexes))
+			throw new TypeError('Column indexes must be an array');
+		if (hideItemIndexes.some(index => !Number.isInteger(index) || index < 0 || index >= 16384))
+			throw new RangeError('Column indexes must be integers between 0 and 16383');
+		const sheet = await this.loadSheet(sheetName);
+		if (!hideItemIndexes.length)
+			return this;
+		let cols = sheet.root.find('cols');
+		if (cols === null) {
+			cols = etree.Element('cols');
+			sheet.root.getchildren().splice(sheet.root.getchildren().indexOf(sheet.root.find('sheetData')), 0, cols);
+		}
+		let definitions = cols.findall('col');
+		for (const index of new Set(hideItemIndexes)) {
+			const colIndex = index + 1;
+			const position = definitions.findIndex(col => colIndex >= Number(col.attrib.min) && colIndex <= Number(col.attrib.max));
+			if (position < 0) {
+				definitions.push(etree.Element('col', { min: String(colIndex), max: String(colIndex), hidden: '1' }));
+				continue;
+			}
+			const col = definitions[position];
+			const min = Number(col.attrib.min), max = Number(col.attrib.max);
+			const segments = [];
+			const segment = (from, to, hidden) => etree.Element('col', {
+				...col.attrib, min: String(from), max: String(to), ...hidden
+			});
+			if (min < colIndex)
+				segments.push(segment(min, colIndex - 1, {}));
+			segments.push(segment(colIndex, colIndex, { hidden: '1' }));
+			if (colIndex < max)
+				segments.push(segment(colIndex + 1, max, {}));
+			definitions.splice(position, 1, ...segments);
+		}
+		definitions.sort((a, b) => Number(a.attrib.min) - Number(b.attrib.min));
+		this.replaceChildren(cols, definitions);
+		this.archive.file(sheet.filename, etree.tostring(sheet.root));
+		this.sheet = sheet;
+		return this;
 	}
 
 	getWidthCell(numCol, sheet) {
@@ -1725,6 +1932,14 @@ class ExcelTemplate {
 		maxid++;
 
 		return maxid;
+	}
+
+	generateUUID() {
+		const bytes = randomBytes(16);
+		bytes[6] = (bytes[6] & 0x0f) | 0x40;
+		bytes[8] = (bytes[8] & 0x3f) | 0x80;
+		const hex = bytes.toString('hex');
+		return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-');
 	}
 
 	cellInMergeCells(cell, mergeCell) {

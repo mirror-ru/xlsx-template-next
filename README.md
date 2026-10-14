@@ -211,6 +211,21 @@ let option = {
 const template = new ExcelTemplate(option);
 ```
 
+### Sheet helpers
+
+You can copy or remove sheets and hide columns by their zero-based indexes:
+
+```js
+await template.copySheet('Sheet1', 'Copy of Sheet1');
+await template.hideCols('Sheet1', [1, 3]); // hide columns B and D
+await template.deleteSheet('Copy of Sheet1');
+```
+
+`hideCols` accepts integer indexes from 0 (A) to 16383 (XFD). It hides only
+the requested columns, preserving the widths and styles of adjacent columns.
+`copySheet` accepts a sheet name or numeric ID; the new name is optional.
+Local defined names and comment threads are copied with the sheet.
+
 At this stage, `data` is a string blob representing the compressed archive that
 is the `.xlsx` file (that's right, a `.xlsx` file is a zip file of XML files,
 if you didn't know). You can send this back to a client, store it to disk,
